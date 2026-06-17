@@ -1,0 +1,14 @@
+{
+  "name": "conductor-music-system",
+  "version": "1.0.0",
+  "description": "Interactive conductor music system using MediaPipe, WebSocket, and Node.js",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0",
+    "sql.js": "^1.10.3",
+    "express": "^4.19.2"
+  }
+}

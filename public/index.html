@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI指挥家 - 手势音乐系统</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="app-container">
+    <header class="header">
+      <h1>🎼 AI指挥家</h1>
+      <p class="subtitle">挥动双手，指挥属于你的旋律</p>
+    </header>
+
+    <div class="main-content">
+      <div class="video-section">
+        <div class="video-wrapper">
+          <video id="inputVideo" autoplay playsinline muted></video>
+          <canvas id="outputCanvas"></canvas>
+          <div class="beat-indicators">
+            <div class="beat-indicator left" id="leftBeatIndicator">
+              <div class="indicator-label">左手</div>
+              <div class="indicator-light" id="leftBeatLight"></div>
+            </div>
+            <div class="beat-indicator right" id="rightBeatIndicator">
+              <div class="indicator-label">右手</div>
+              <div class="indicator-light" id="rightBeatLight"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="status-bar">
+          <div class="status-item">
+            <span class="status-label">连接状态:</span>
+            <span id="connectionStatus" class="status-value disconnected">未连接</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">FPS:</span>
+            <span id="fpsCounter" class="status-value">0</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">总节拍:</span>
+            <span id="beatCount" class="status-value">0</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="data-section">
+        <div class="panel">
+          <h3>实时力度</h3>
+          <div class="intensity-display">
+            <div class="intensity-row">
+              <span class="intensity-label">左手</span>
+              <div class="intensity-bar-container">
+                <div class="intensity-bar left" id="leftIntensityBar"></div>
+              </div>
+              <span class="intensity-value" id="leftIntensityValue">0%</span>
+            </div>
+            <div class="intensity-row">
+              <span class="intensity-label">右手</span>
+              <div class="intensity-bar-container">
+                <div class="intensity-bar right" id="rightIntensityBar"></div>
+              </div>
+              <span class="intensity-value" id="rightIntensityValue">0%</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3>力度波纹</h3>
+          <canvas id="rippleCanvas" class="ripple-canvas"></canvas>
+        </div>
+
+        <div class="panel">
+          <h3>控制面板</h3>
+          <div class="controls">
+            <button id="startBtn" class="btn btn-primary">开始捕捉</button>
+            <button id="stopBtn" class="btn btn-secondary" disabled>停止</button>
+            <label class="volume-control">
+              <span>音量</span>
+              <input type="range" id="volumeSlider" min="0" max="100" value="50" />
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
