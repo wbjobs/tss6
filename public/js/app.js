@@ -10,12 +10,22 @@ const leftIntensityBar = document.getElementById('leftIntensityBar');
 const rightIntensityBar = document.getElementById('rightIntensityBar');
 const leftIntensityValue = document.getElementById('leftIntensityValue');
 const rightIntensityValue = document.getElementById('rightIntensityValue');
-const connectionStatus = document.getElementById('connectionStatus');
+const roomIdDisplay = document.getElementById('roomIdDisplay');
+const sectionDisplay = document.getElementById('sectionDisplay');
+const partnerStatusEl = document.getElementById('partnerStatus');
 const fpsCounter = document.getElementById('fpsCounter');
 const beatCountEl = document.getElementById('beatCount');
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const volumeSlider = document.getElementById('volumeSlider');
+
+const setupPanel = document.getElementById('setupPanel');
+const mainContent = document.getElementById('mainContent');
+const joinBtn = document.getElementById('joinBtn');
+const roomIdInput = document.getElementById('roomIdInput');
+const generateRoomBtn = document.getElementById('generateRoomBtn');
+const setupPartnerDot = document.querySelector('#partnerStatus .partner-dot');
+const setupPartnerText = document.querySelector('#partnerStatus .partner-text');
 
 let ws = null;
 let hands = null;
@@ -27,17 +37,29 @@ let beatCount = 0;
 let audioCtx = null;
 let masterGain = null;
 let audioRenderLoopId = null;
+let currentRoomId = null;
+let currentSection = null;
+let partnerConnected = false;
+let partnerLandmarks = null;
 
 const ripples = [];
 
 const audioEventQueue = [];
 const AUDIO_QUEUE_MAX_SIZE = 32;
 const AUDIO_MIN_INTERVAL = 60;
-const lastAudioPlayTime = { left: 0, right: 0 };
+const lastAudioPlayTime = { strings: { left: 0, right: 0 }, wind: { left: 0, right: 0 } };
 
 const oscillatorPool = [];
 const gainPool = [];
-const POOL_MAX_SIZE = 16;
+const POOL_MAX_SIZE = 20;
+
+function generateRandomRoomId() {
+  return Math.random().toString(36).substring(2, 8).toUpperCase();
+}
+
+generateRoomBtn.addEventListener('click', () => {
+  roomIdInput.value = generateRandomRoomId();
+});
 
 function initAudio() {
   if (audioCtx) return;
@@ -63,7 +85,7 @@ function initAudio() {
   compressor.connect(limiter);
   limiter.connect(audioCtx.destination);
 
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 6; i++) {
     oscillatorPool.push(createPooledOscillator());
     gainPool.push(audioCtx.createGain());
   }
@@ -96,7 +118,7 @@ function acquireOscillator() {
 
 function releaseOscillator(osc) {
   if (osc && osc._pooled) {
-    osc.disconnect();
+    try { osc.disconnect(); } catch (e) {}
     osc._active = false;
   }
 }
@@ -119,16 +141,16 @@ function acquireGain() {
 
 function releaseGain(gain) {
   if (gain && gain._active) {
-    gain.disconnect();
-    gain.gain.cancelScheduledValues(audioCtx.currentTime);
+    try { gain.disconnect(); } catch (e) {}
+    try { gain.gain.cancelScheduledValues(audioCtx.currentTime); } catch (e) {}
     gain._active = false;
   }
 }
 
-function enqueueAudioEvent(frequency, intensity, hand) {
+function enqueueAudioEvent(frequency, intensity, section, hand) {
   const now = performance.now();
 
-  if (now - lastAudioPlayTime[hand] < AUDIO_MIN_INTERVAL) {
+  if (now - lastAudioPlayTime[section][hand] < AUDIO_MIN_INTERVAL) {
     return false;
   }
 
@@ -139,9 +161,9 @@ function enqueueAudioEvent(frequency, intensity, hand) {
   audioEventQueue.push({
     frequency,
     intensity,
+    section,
     hand,
-    enqueueTime: now,
-    scheduled: false
+    enqueueTime: now
   });
 
   return true;
@@ -161,95 +183,133 @@ function processAudioQueue() {
       continue;
     }
 
-    if (now - lastAudioPlayTime[event.hand] < AUDIO_MIN_INTERVAL) {
+    if (now - lastAudioPlayTime[event.section][event.hand] < AUDIO_MIN_INTERVAL) {
       break;
     }
 
-    const played = playNoteFromPool(event.frequency, event.intensity, audioNow);
+    const played = playNoteFromPool(event.frequency, event.intensity, event.section, audioNow);
     if (played) {
-      lastAudioPlayTime[event.hand] = now;
-      event.scheduled = true;
+      lastAudioPlayTime[event.section][event.hand] = now;
     }
     audioEventQueue.shift();
   }
 }
 
-function playNoteFromPool(frequency, intensity, startTime) {
+function playNoteFromPool(frequency, intensity, section, startTime) {
   const osc1 = acquireOscillator();
   const osc2 = acquireOscillator();
+  const osc3 = acquireOscillator();
   const gain1 = acquireGain();
   const gain2 = acquireGain();
+  const gain3 = acquireGain();
 
-  if (!osc1 || !osc2 || !gain1 || !gain2) {
+  if (!osc1 || !gain1) {
     releaseOscillator(osc1);
     releaseOscillator(osc2);
+    releaseOscillator(osc3);
     releaseGain(gain1);
     releaseGain(gain2);
+    releaseGain(gain3);
     return false;
   }
 
-  const volume = Math.min(0.75, 0.08 + intensity * 0.67);
+  const baseVolume = Math.min(0.7, 0.06 + intensity * 0.64);
   const attack = 0.008;
-  const decay = 0.12;
-  const sustain = 0.28;
-  const release = 0.35;
+  const decay = section === 'strings' ? 0.25 : 0.12;
+  const sustain = section === 'strings' ? 0.4 : 0.28;
+  const release = section === 'strings' ? 0.6 : 0.35;
   const totalDuration = attack + decay + release + 0.05;
 
-  osc1.type = 'sine';
+  osc1.type = section === 'strings' ? 'sawtooth' : 'sine';
   osc1.frequency.setValueAtTime(frequency, startTime);
 
-  osc2.type = 'triangle';
-  osc2.frequency.setValueAtTime(frequency * 2, startTime);
+  if (osc2) {
+    osc2.type = section === 'strings' ? 'triangle' : 'triangle';
+    osc2.frequency.setValueAtTime(frequency * 2, startTime);
+  }
+
+  if (osc3 && section === 'strings') {
+    osc3.type = 'sine';
+    osc3.frequency.setValueAtTime(frequency * 3, startTime);
+  }
 
   gain1.gain.cancelScheduledValues(startTime);
   gain1.gain.setValueAtTime(0, startTime);
 
   try {
-    gain1.gain.linearRampToValueAtTime(volume, startTime + attack);
-    gain1.gain.linearRampToValueAtTime(volume * sustain, startTime + attack + decay);
+    gain1.gain.linearRampToValueAtTime(baseVolume, startTime + attack);
+    gain1.gain.linearRampToValueAtTime(baseVolume * sustain, startTime + attack + decay);
     gain1.gain.linearRampToValueAtTime(0.0001, startTime + attack + decay + release);
   } catch (e) {
-    gain1.gain.setValueAtTime(volume, startTime + 0.01);
+    gain1.gain.setValueAtTime(baseVolume, startTime + 0.01);
     gain1.gain.setValueAtTime(0.0001, startTime + totalDuration - 0.01);
   }
 
-  gain2.gain.cancelScheduledValues(startTime);
-  gain2.gain.setValueAtTime(0, startTime);
+  if (osc2 && gain2) {
+    gain2.gain.cancelScheduledValues(startTime);
+    gain2.gain.setValueAtTime(0, startTime);
+    const harmonicVol = baseVolume * (section === 'strings' ? 0.2 : 0.12);
+    try {
+      gain2.gain.linearRampToValueAtTime(harmonicVol, startTime + attack);
+      gain2.gain.linearRampToValueAtTime(0.0001, startTime + attack + decay + release);
+    } catch (e) {
+      gain2.gain.setValueAtTime(harmonicVol, startTime + 0.01);
+      gain2.gain.setValueAtTime(0.0001, startTime + totalDuration - 0.01);
+    }
+  }
 
-  const harmonicVolume = volume * 0.12;
-  try {
-    gain2.gain.linearRampToValueAtTime(harmonicVolume, startTime + attack);
-    gain2.gain.linearRampToValueAtTime(0.0001, startTime + attack + decay + release);
-  } catch (e) {
-    gain2.gain.setValueAtTime(harmonicVolume, startTime + 0.01);
-    gain2.gain.setValueAtTime(0.0001, startTime + totalDuration - 0.01);
+  if (osc3 && gain3 && section === 'strings') {
+    gain3.gain.cancelScheduledValues(startTime);
+    gain3.gain.setValueAtTime(0, startTime);
+    const harmonicVol = baseVolume * 0.08;
+    try {
+      gain3.gain.linearRampToValueAtTime(harmonicVol, startTime + attack * 2);
+      gain3.gain.linearRampToValueAtTime(0.0001, startTime + attack + decay + release);
+    } catch (e) {
+      gain3.gain.setValueAtTime(harmonicVol, startTime + 0.02);
+      gain3.gain.setValueAtTime(0.0001, startTime + totalDuration - 0.01);
+    }
   }
 
   osc1.connect(gain1);
-  osc2.connect(gain2);
   gain1.connect(masterGain);
-  gain2.connect(masterGain);
+
+  if (osc2 && gain2) {
+    osc2.connect(gain2);
+    gain2.connect(masterGain);
+  }
+
+  if (osc3 && gain3 && section === 'strings') {
+    osc3.connect(gain3);
+    gain3.connect(masterGain);
+  }
 
   try {
     osc1.start(startTime);
-    osc2.start(startTime);
+    if (osc2) osc2.start(startTime);
+    if (osc3 && section === 'strings') osc3.start(startTime);
   } catch (e) {
     releaseOscillator(osc1);
     releaseOscillator(osc2);
+    releaseOscillator(osc3);
     releaseGain(gain1);
     releaseGain(gain2);
+    releaseGain(gain3);
     return false;
   }
 
   const stopTime = startTime + totalDuration;
   osc1.stop(stopTime);
-  osc2.stop(stopTime);
+  if (osc2) osc2.stop(stopTime);
+  if (osc3 && section === 'strings') osc3.stop(stopTime);
 
   setTimeout(() => {
     releaseOscillator(osc1);
     releaseOscillator(osc2);
+    releaseOscillator(osc3);
     releaseGain(gain1);
     releaseGain(gain2);
+    releaseGain(gain3);
   }, totalDuration * 1000 + 50);
 
   return true;
@@ -257,12 +317,10 @@ function playNoteFromPool(frequency, intensity, startTime) {
 
 function startAudioRenderLoop() {
   if (audioRenderLoopId) return;
-
   const render = () => {
     processAudioQueue();
     audioRenderLoopId = requestAnimationFrame(render);
   };
-
   audioRenderLoopId = requestAnimationFrame(render);
 }
 
@@ -273,9 +331,9 @@ function stopAudioRenderLoop() {
   }
 }
 
-function playNote(frequency, intensity, hand) {
+function playNote(frequency, intensity, section, hand) {
   if (!audioCtx || !masterGain) return;
-  enqueueAudioEvent(frequency, intensity, hand || 'left');
+  enqueueAudioEvent(frequency, intensity, section, hand || 'left');
 }
 
 volumeSlider.addEventListener('input', () => {
@@ -289,15 +347,11 @@ function initWebSocket() {
   ws = new WebSocket(`${protocol}//${window.location.host}`);
 
   ws.onopen = () => {
-    connectionStatus.textContent = '已连接';
-    connectionStatus.classList.remove('disconnected');
-    connectionStatus.classList.add('connected');
+    joinRoom();
   };
 
   ws.onclose = () => {
-    connectionStatus.textContent = '未连接';
-    connectionStatus.classList.remove('connected');
-    connectionStatus.classList.add('disconnected');
+    updatePartnerStatus(false);
   };
 
   ws.onerror = (e) => {
@@ -310,24 +364,103 @@ function initWebSocket() {
   };
 }
 
+function joinRoom() {
+  if (ws && ws.readyState === WebSocket.OPEN && currentRoomId && currentSection) {
+    ws.send(JSON.stringify({
+      type: 'join',
+      roomId: currentRoomId,
+      section: currentSection
+    }));
+  }
+}
+
 function handleServerMessage(data) {
-  if (data.leftBeat) {
-    triggerBeat('left', data.leftIntensity);
-    if (data.leftNote) {
-      playNote(data.leftNote, data.leftIntensity, 'left');
-      addRipple('left', data.leftIntensity);
+  if (data.type === 'joined') {
+    setupPanel.style.display = 'none';
+    mainContent.style.display = 'grid';
+
+    roomIdDisplay.textContent = data.roomId;
+    sectionDisplay.textContent = data.section === 'strings' ? '🎻 弦乐组' : '🎺 管乐组';
+    sectionDisplay.className = 'status-value section-badge ' + data.section;
+
+    updatePartnerStatus(data.partnerConnected);
+    startCapture();
+    return;
+  }
+
+  if (data.type === 'partnerJoined') {
+    updatePartnerStatus(true);
+    return;
+  }
+
+  if (data.type === 'partnerLeft') {
+    updatePartnerStatus(false);
+    partnerLandmarks = null;
+    return;
+  }
+
+  if (data.type === 'error') {
+    alert(data.message);
+    return;
+  }
+
+  if (data.type === 'beatUpdate') {
+    const myData = data[currentSection];
+    const partnerSection = currentSection === 'strings' ? 'wind' : 'strings';
+    const partnerData = data[partnerSection];
+
+    if (myData) {
+      if (myData.leftBeat) {
+        triggerBeat('left', myData.leftIntensity);
+        if (myData.leftNote) {
+          playNote(myData.leftNote, myData.leftIntensity, currentSection, 'left');
+          addRipple('left', myData.leftIntensity, currentSection);
+        }
+      }
+      if (myData.rightBeat) {
+        triggerBeat('right', myData.rightIntensity);
+        if (myData.rightNote) {
+          playNote(myData.rightNote, myData.rightIntensity, currentSection, 'right');
+          addRipple('right', myData.rightIntensity, currentSection);
+        }
+      }
+
+      updateIntensity('left', myData.leftIntensity);
+      updateIntensity('right', myData.rightIntensity);
+    }
+
+    if (partnerData && partnerData.landmarks) {
+      partnerLandmarks = partnerData.landmarks;
+    } else {
+      partnerLandmarks = null;
     }
   }
-  if (data.rightBeat) {
-    triggerBeat('right', data.rightIntensity);
-    if (data.rightNote) {
-      playNote(data.rightNote, data.rightIntensity, 'right');
-      addRipple('right', data.rightIntensity);
+}
+
+function updatePartnerStatus(connected) {
+  partnerConnected = connected;
+
+  if (partnerStatusEl) {
+    if (connected) {
+      partnerStatusEl.textContent = '已连接';
+      partnerStatusEl.className = 'status-value connected';
+    } else {
+      partnerStatusEl.textContent = '未连接';
+      partnerStatusEl.className = 'status-value disconnected';
     }
   }
 
-  updateIntensity('left', data.leftIntensity);
-  updateIntensity('right', data.rightIntensity);
+  if (setupPartnerDot && setupPartnerText) {
+    if (connected) {
+      setupPartnerDot.className = 'partner-dot connected';
+      setupPartnerText.textContent = '合作伙伴已加入！';
+      setupPartnerText.className = 'partner-text connected';
+    } else {
+      setupPartnerDot.className = 'partner-dot';
+      setupPartnerText.textContent = '等待对方加入...';
+      setupPartnerText.className = 'partner-text';
+    }
+  }
 }
 
 function triggerBeat(hand, intensity) {
@@ -349,15 +482,16 @@ function updateIntensity(hand, intensity) {
   }
 }
 
-function addRipple(hand, intensity) {
+function addRipple(hand, intensity, section) {
   const rect = rippleCanvas.getBoundingClientRect();
+  const color = section === 'strings' ? '168, 85, 247' : '59, 130, 246';
   ripples.push({
     x: hand === 'left' ? rect.width * 0.25 : rect.width * 0.75,
     y: rect.height / 2,
     radius: 5,
     maxRadius: 30 + intensity * 80,
     opacity: 0.8,
-    color: hand === 'left' ? '34, 197, 94' : '59, 130, 246'
+    color
   });
 }
 
@@ -393,6 +527,48 @@ function resizeCanvas() {
   canvasElement.height = rect.height;
 }
 
+function drawHandLandmarks(landmarks, handedness, isPartner) {
+  if (!window.drawConnectors || !window.HAND_CONNECTIONS || !landmarks) return;
+
+  const landmarksArray = isPartner ? partnerLandmarksToLandmarkArray(landmarks) : landmarks;
+  if (!landmarksArray || landmarksArray.length < 21) return;
+
+  let color, lineWidth;
+  if (isPartner) {
+    color = currentSection === 'strings' ? 'rgba(59, 130, 246, 0.5)' : 'rgba(168, 85, 247, 0.5)';
+    lineWidth = 2;
+  } else {
+    color = handedness === 'Left'
+      ? (currentSection === 'strings' ? '#a855f7' : '#3b82f6')
+      : '#22c55e';
+    lineWidth = 3;
+  }
+
+  const scale = handedness === 'Right' && isPartner ? -1 : 1;
+  const offsetX = isPartner ? 0.02 : 0;
+
+  const adjustedLandmarks = landmarksArray.map(lm => ({
+    x: (lm.x + offsetX) * scale * 0.5 + (isPartner ? 0.5 : 0),
+    y: lm.y,
+    z: lm.z
+  }));
+
+  window.drawConnectors(canvasCtx, adjustedLandmarks, window.HAND_CONNECTIONS, {
+    color,
+    lineWidth
+  });
+  window.drawLandmarks(canvasCtx, adjustedLandmarks, {
+    color,
+    lineWidth: 1,
+    radius: isPartner ? 2 : 3
+  });
+}
+
+function partnerLandmarksToLandmarkArray(data) {
+  if (!data) return null;
+  return data.landmarks || null;
+}
+
 function onResults(results) {
   resizeCanvas();
   canvasCtx.save();
@@ -401,25 +577,17 @@ function onResults(results) {
 
   const frameData = {
     leftWrist: null,
-    rightWrist: null
+    rightWrist: null,
+    landmarks: null
   };
 
   if (results.multiHandLandmarks && results.multiHandedness) {
+    const allLandmarks = [];
+
     for (let i = 0; i < results.multiHandLandmarks.length; i++) {
       const landmarks = results.multiHandLandmarks[i];
       const handedness = results.multiHandedness[i].label;
-
-      if (window.drawConnectors && window.HAND_CONNECTIONS) {
-        window.drawConnectors(canvasCtx, landmarks, window.HAND_CONNECTIONS, {
-          color: handedness === 'Left' ? '#22c55e' : '#3b82f6',
-          lineWidth: 3
-        });
-        window.drawLandmarks(canvasCtx, landmarks, {
-          color: handedness === 'Left' ? '#4ade80' : '#60a5fa',
-          lineWidth: 1,
-          radius: 3
-        });
-      }
+      allLandmarks.push({ landmarks, handedness });
 
       const wrist = landmarks[0];
       if (handedness === 'Left') {
@@ -427,13 +595,20 @@ function onResults(results) {
       } else {
         frameData.rightWrist = { x: wrist.x, y: wrist.y, z: wrist.z };
       }
+
+      drawHandLandmarks(landmarks, handedness, false);
     }
+
+    frameData.landmarks = allLandmarks;
   }
 
   canvasCtx.restore();
 
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(frameData));
+    ws.send(JSON.stringify({
+      type: 'frame',
+      ...frameData
+    }));
   }
 
   frameCount++;
@@ -450,8 +625,6 @@ async function startCapture() {
   if (audioCtx && audioCtx.state === 'suspended') {
     await audioCtx.resume();
   }
-
-  initWebSocket();
 
   hands = new Hands({
     locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
@@ -498,14 +671,31 @@ function stopCapture() {
   stopAudioRenderLoop();
 
   audioEventQueue.length = 0;
-  lastAudioPlayTime.left = 0;
-  lastAudioPlayTime.right = 0;
+  lastAudioPlayTime.strings.left = 0;
+  lastAudioPlayTime.strings.right = 0;
+  lastAudioPlayTime.wind.left = 0;
+  lastAudioPlayTime.wind.right = 0;
 
+  partnerLandmarks = null;
   canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
   isRunning = false;
   startBtn.disabled = false;
   stopBtn.disabled = true;
 }
+
+joinBtn.addEventListener('click', () => {
+  const roomId = roomIdInput.value.trim().toUpperCase();
+  const section = document.querySelector('input[name="section"]:checked').value;
+
+  if (!roomId) {
+    alert('请输入房间号');
+    return;
+  }
+
+  currentRoomId = roomId;
+  currentSection = section;
+  initWebSocket();
+});
 
 startBtn.addEventListener('click', startCapture);
 stopBtn.addEventListener('click', stopCapture);

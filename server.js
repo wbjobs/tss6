@@ -13,9 +13,15 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const DB_PATH = './conductor_data.db';
 let db = null;
-let insertStmt = null;
 
-const C_MAJOR_SCALE = [261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88, 523.25];
+const C_MAJOR_SCALE_STRINGS = [196.00, 220.00, 246.94, 261.63, 293.66, 329.63, 349.23, 392.00];
+const C_MAJOR_SCALE_WIND = [261.63, 293.66, 329.66, 349.23, 392.00, 440.00, 493.88, 523.25];
+
+const ROOMS = new Map();
+
+function generateRoomId() {
+  return Math.random().toString(36).substring(2, 8).toUpperCase();
+}
 
 async function initDatabase() {
   const SQL = await initSqlJs();
@@ -31,6 +37,8 @@ async function initDatabase() {
     CREATE TABLE IF NOT EXISTS beats (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       timestamp INTEGER NOT NULL,
+      room_id TEXT NOT NULL,
+      section TEXT NOT NULL,
       hand TEXT NOT NULL,
       velocity REAL NOT NULL,
       intensity REAL NOT NULL,
@@ -53,12 +61,12 @@ function saveDatabase() {
   }
 }
 
-function insertBeat(timestamp, hand, velocity, intensity, note) {
+function insertBeat(timestamp, roomId, section, hand, velocity, intensity, note) {
   if (!db) return;
   try {
     db.run(
-      'INSERT INTO beats (timestamp, hand, velocity, intensity, note) VALUES (?, ?, ?, ?, ?)',
-      [timestamp, hand, velocity, intensity, note]
+      'INSERT INTO beats (timestamp, room_id, section, hand, velocity, intensity, note) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [timestamp, roomId, section, hand, velocity, intensity, note]
     );
   } catch (e) {
     console.error('Error inserting beat:', e);
@@ -70,8 +78,9 @@ setInterval(() => {
 }, 5000);
 
 class BeatDetector {
-  constructor(hand) {
+  constructor(hand, scale) {
     this.hand = hand;
+    this.scale = scale;
     this.prevWrist = null;
     this.prevTime = null;
     this.prevVelocity = 0;
@@ -107,7 +116,6 @@ class BeatDetector {
     this.peakVelocityInWindow = 0;
 
     this.consecutiveBeats = 0;
-    this.lastMissedBeatTime = 0;
   }
 
   update(wrist, timestamp) {
@@ -331,76 +339,299 @@ class BeatDetector {
   }
 
   getNextNote() {
-    const freq = C_MAJOR_SCALE[this.scaleIndex % C_MAJOR_SCALE.length];
+    const freq = this.scale[this.scaleIndex % this.scale.length];
     this.scaleIndex++;
     return freq;
   }
 }
 
-const leftDetector = new BeatDetector('left');
-const rightDetector = new BeatDetector('right');
+class Conductor {
+  constructor(ws, section) {
+    this.ws = ws;
+    this.section = section;
+    const scale = section === 'strings' ? C_MAJOR_SCALE_STRINGS : C_MAJOR_SCALE_WIND;
+    this.leftDetector = new BeatDetector('left', scale);
+    this.rightDetector = new BeatDetector('right', scale);
+    this.lastLandmarks = null;
+    this.connected = true;
+  }
 
-function broadcast(data) {
-  const message = JSON.stringify(data);
-  wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(message);
+  processFrame(data, timestamp) {
+    const result = {
+      section: this.section,
+      leftBeat: false,
+      rightBeat: false,
+      leftNote: null,
+      rightNote: null,
+      leftIntensity: this.leftDetector.currentIntensity,
+      rightIntensity: this.rightDetector.currentIntensity,
+      leftVelocity: 0,
+      rightVelocity: 0,
+      landmarks: data
+    };
+
+    if (data.leftWrist) {
+      const leftResult = this.leftDetector.update(data.leftWrist, timestamp);
+      result.leftBeat = leftResult.beat;
+      result.leftIntensity = leftResult.intensity;
+      result.leftVelocity = leftResult.velocity || 0;
+
+      if (leftResult.beat) {
+        const noteFreq = this.leftDetector.getNextNote();
+        result.leftNote = noteFreq;
+        insertBeat(timestamp, this.room.id, this.section, 'left', leftResult.velocity || 0, leftResult.intensity, Math.round(noteFreq));
+      }
     }
-  });
+
+    if (data.rightWrist) {
+      const rightResult = this.rightDetector.update(data.rightWrist, timestamp);
+      result.rightBeat = rightResult.beat;
+      result.rightIntensity = rightResult.intensity;
+      result.rightVelocity = rightResult.velocity || 0;
+
+      if (rightResult.beat) {
+        const noteFreq = this.rightDetector.getNextNote();
+        result.rightNote = noteFreq;
+        insertBeat(timestamp, this.room.id, this.section, 'right', rightResult.velocity || 0, rightResult.intensity, Math.round(noteFreq));
+      }
+    }
+
+    this.lastLandmarks = data;
+    return result;
+  }
+}
+
+class Room {
+  constructor(id) {
+    this.id = id;
+    this.stringsConductor = null;
+    this.windConductor = null;
+    this.createdAt = Date.now();
+  }
+
+  addConductor(ws, section) {
+    if (section === 'strings' && !this.stringsConductor) {
+      this.stringsConductor = new Conductor(ws, 'strings');
+      return this.stringsConductor;
+    }
+    if (section === 'wind' && !this.windConductor) {
+      this.windConductor = new Conductor(ws, 'wind');
+      return this.windConductor;
+    }
+    return null;
+  }
+
+  removeConductor(section) {
+    if (section === 'strings') {
+      this.stringsConductor = null;
+    } else if (section === 'wind') {
+      this.windConductor = null;
+    }
+  }
+
+  getOtherConductor(section) {
+    return section === 'strings' ? this.windConductor : this.stringsConductor;
+  }
+
+  isEmpty() {
+    return !this.stringsConductor && !this.windConductor;
+  }
+
+  isFull() {
+    return this.stringsConductor && this.windConductor;
+  }
+
+  broadcastToAll(message) {
+    if (this.stringsConductor && this.stringsConductor.ws.readyState === WebSocket.OPEN) {
+      this.stringsConductor.ws.send(message);
+    }
+    if (this.windConductor && this.windConductor.ws.readyState === WebSocket.OPEN) {
+      this.windConductor.ws.send(message);
+    }
+  }
+}
+
+function getOrCreateRoom(roomId) {
+  let room = ROOMS.get(roomId);
+  if (!room) {
+    room = new Room(roomId);
+    ROOMS.set(roomId, room);
+    console.log(`Room ${roomId} created`);
+  }
+  return room;
+}
+
+function cleanupEmptyRooms() {
+  for (const [id, room] of ROOMS) {
+    if (room.isEmpty()) {
+      ROOMS.delete(id);
+      console.log(`Room ${id} cleaned up`);
+    }
+  }
+}
+
+setInterval(cleanupEmptyRooms, 60000);
+
+function sendToClient(ws, type, data) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type, ...data }));
+  }
 }
 
 wss.on('connection', (ws) => {
-  console.log('Client connected');
+  let currentRoom = null;
+  let currentSection = null;
+  let conductor = null;
 
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message.toString());
       const timestamp = Date.now();
 
-      const result = {
-        timestamp,
-        leftBeat: false,
-        rightBeat: false,
-        leftIntensity: leftDetector.currentIntensity,
-        rightIntensity: rightDetector.currentIntensity,
-        leftVelocity: 0,
-        rightVelocity: 0
-      };
+      if (data.type === 'join') {
+        const { roomId, section } = data;
+        const room = getOrCreateRoom(roomId);
 
-      if (data.leftWrist) {
-        const leftResult = leftDetector.update(data.leftWrist, timestamp);
-        result.leftBeat = leftResult.beat;
-        result.leftIntensity = leftResult.intensity;
-        result.leftVelocity = leftResult.velocity || 0;
-
-        if (leftResult.beat) {
-          const noteFreq = leftDetector.getNextNote();
-          result.leftNote = noteFreq;
-          insertBeat(timestamp, 'left', leftResult.velocity || 0, leftResult.intensity, Math.round(noteFreq));
+        if (section !== 'strings' && section !== 'wind') {
+          sendToClient(ws, 'error', { message: 'Invalid section' });
+          return;
         }
+
+        const existing = section === 'strings' ? room.stringsConductor : room.windConductor;
+        if (existing) {
+          sendToClient(ws, 'error', { message: `${section} section already occupied` });
+          return;
+        }
+
+        conductor = room.addConductor(ws, section);
+        if (!conductor) {
+          sendToClient(ws, 'error', { message: 'Failed to join room' });
+          return;
+        }
+
+        currentRoom = room;
+        currentSection = section;
+
+        const partner = room.getOtherConductor(section);
+
+        sendToClient(ws, 'joined', {
+          roomId: room.id,
+          section,
+          partnerConnected: !!partner,
+          partnerSection: partner ? (section === 'strings' ? 'wind' : 'strings') : null
+        });
+
+        if (partner) {
+          sendToClient(partner.ws, 'partnerJoined', {
+            section: currentSection
+          });
+        }
+
+        console.log(`Client joined room ${room.id} as ${section}`);
+        return;
       }
 
-      if (data.rightWrist) {
-        const rightResult = rightDetector.update(data.rightWrist, timestamp);
-        result.rightBeat = rightResult.beat;
-        result.rightIntensity = rightResult.intensity;
-        result.rightVelocity = rightResult.velocity || 0;
+      if (data.type === 'frame' && currentRoom && conductor) {
+        const result = conductor.processFrame(data, timestamp);
 
-        if (rightResult.beat) {
-          const noteFreq = rightDetector.getNextNote();
-          result.rightNote = noteFreq;
-          insertBeat(timestamp, 'right', rightResult.velocity || 0, rightResult.intensity, Math.round(noteFreq));
+        const myResult = {
+          type: 'beatUpdate',
+          mySection: currentSection,
+          strings: null,
+          wind: null
+        };
+
+        if (currentSection === 'strings') {
+          myResult.strings = result;
+          const partner = currentRoom.windConductor;
+          if (partner && partner.lastLandmarks) {
+            myResult.wind = {
+              section: 'wind',
+              leftBeat: false,
+              rightBeat: false,
+              leftIntensity: partner.leftDetector.currentIntensity,
+              rightIntensity: partner.rightDetector.currentIntensity,
+              leftVelocity: 0,
+              rightVelocity: 0,
+              landmarks: partner.lastLandmarks
+            };
+          }
+        } else {
+          myResult.wind = result;
+          const partner = currentRoom.stringsConductor;
+          if (partner && partner.lastLandmarks) {
+            myResult.strings = {
+              section: 'strings',
+              leftBeat: false,
+              rightBeat: false,
+              leftIntensity: partner.leftDetector.currentIntensity,
+              rightIntensity: partner.rightDetector.currentIntensity,
+              leftVelocity: 0,
+              rightVelocity: 0,
+              landmarks: partner.lastLandmarks
+            };
+          }
         }
-      }
 
-      broadcast(result);
+        const partner = currentRoom.getOtherConductor(currentSection);
+        if (partner && partner.ws.readyState === WebSocket.OPEN) {
+          const partnerResult = {
+            type: 'beatUpdate',
+            mySection: partner.section,
+            strings: null,
+            wind: null
+          };
+
+          if (partner.section === 'strings') {
+            partnerResult.strings = {
+              section: 'strings',
+              leftBeat: false,
+              rightBeat: false,
+              leftIntensity: partner.leftDetector.currentIntensity,
+              rightIntensity: partner.rightDetector.currentIntensity,
+              leftVelocity: 0,
+              rightVelocity: 0,
+              landmarks: partner.lastLandmarks
+            };
+            partnerResult.wind = result;
+          } else {
+            partnerResult.wind = {
+              section: 'wind',
+              leftBeat: false,
+              rightBeat: false,
+              leftIntensity: partner.leftDetector.currentIntensity,
+              rightIntensity: partner.rightDetector.currentIntensity,
+              leftVelocity: 0,
+              rightVelocity: 0,
+              landmarks: partner.lastLandmarks
+            };
+            partnerResult.strings = result;
+          }
+
+          partner.ws.send(JSON.stringify(partnerResult));
+        }
+
+        ws.send(JSON.stringify(myResult));
+      }
     } catch (e) {
       console.error('Error processing message:', e);
     }
   });
 
   ws.on('close', () => {
-    console.log('Client disconnected');
+    if (currentRoom && currentSection) {
+      const partner = currentRoom.getOtherConductor(currentSection);
+      if (partner) {
+        sendToClient(partner.ws, 'partnerLeft', { section: currentSection });
+      }
+
+      currentRoom.removeConductor(currentSection);
+      console.log(`Client left room ${currentRoom.id} (${currentSection})`);
+
+      if (currentRoom.isEmpty()) {
+        setTimeout(cleanupEmptyRooms, 1000);
+      }
+    }
   });
 });
 

@@ -36,6 +36,192 @@ body {
   font-size: 1rem;
 }
 
+.setup-panel {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 20px 0;
+}
+
+.setup-card {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  padding: 32px;
+  backdrop-filter: blur(10px);
+  width: 100%;
+  max-width: 520px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+.setup-card h2 {
+  font-size: 1.5rem;
+  margin-bottom: 8px;
+  background: linear-gradient(135deg, #e94560 0%, #feca57 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.setup-desc {
+  color: #a1a1aa;
+  font-size: 0.9rem;
+  margin-bottom: 24px;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 0.9rem;
+  color: #d4d4d8;
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+
+.room-input-group {
+  display: flex;
+  gap: 10px;
+}
+
+.room-input-group input {
+  flex: 1;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+  color: #f4f4f5;
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+}
+
+.room-input-group input:focus {
+  outline: none;
+  border-color: #e94560;
+  box-shadow: 0 0 0 3px rgba(233, 69, 96, 0.2);
+}
+
+.btn-small {
+  padding: 12px 16px;
+  font-size: 0.85rem;
+}
+
+.btn-large {
+  width: 100%;
+  padding: 14px 24px;
+  font-size: 1rem;
+}
+
+.section-selector {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.section-option {
+  cursor: pointer;
+}
+
+.section-option input {
+  display: none;
+}
+
+.section-card {
+  background: rgba(255, 255, 255, 0.05);
+  border: 2px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 16px;
+  text-align: center;
+  transition: all 0.2s ease;
+}
+
+.section-option input:checked + .section-card {
+  background: rgba(233, 69, 96, 0.15);
+  border-color: #e94560;
+}
+
+.strings-option input:checked + .section-card {
+  background: rgba(168, 85, 247, 0.15);
+  border-color: #a855f7;
+}
+
+.wind-option input:checked + .section-card {
+  background: rgba(59, 130, 246, 0.15);
+  border-color: #3b82f6;
+}
+
+.section-icon {
+  font-size: 2rem;
+  margin-bottom: 8px;
+}
+
+.section-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+  margin-bottom: 4px;
+}
+
+.section-desc {
+  font-size: 0.75rem;
+  color: #a1a1aa;
+}
+
+.partner-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.partner-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 8px #f59e0b;
+  animation: pulse 2s infinite;
+}
+
+.partner-dot.connected {
+  background: #22c55e;
+  box-shadow: 0 0 8px #22c55e;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.partner-text {
+  font-size: 0.85rem;
+  color: #a1a1aa;
+}
+
+.partner-text.connected {
+  color: #22c55e;
+  font-weight: 500;
+}
+
+.room-id {
+  font-family: monospace;
+  letter-spacing: 1px;
+  color: #feca57;
+}
+
+.section-badge.strings {
+  color: #a855f7;
+}
+
+.section-badge.wind {
+  color: #3b82f6;
+}
+
 .main-content {
   display: grid;
   grid-template-columns: 1fr 380px;
