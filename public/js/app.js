@@ -26,57 +26,256 @@ let lastFpsUpdate = Date.now();
 let beatCount = 0;
 let audioCtx = null;
 let masterGain = null;
+let audioRenderLoopId = null;
 
 const ripples = [];
+
+const audioEventQueue = [];
+const AUDIO_QUEUE_MAX_SIZE = 32;
+const AUDIO_MIN_INTERVAL = 60;
+const lastAudioPlayTime = { left: 0, right: 0 };
+
+const oscillatorPool = [];
+const gainPool = [];
+const POOL_MAX_SIZE = 16;
 
 function initAudio() {
   if (audioCtx) return;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   masterGain = audioCtx.createGain();
   masterGain.gain.value = parseInt(volumeSlider.value) / 100;
-  masterGain.connect(audioCtx.destination);
+
+  const compressor = audioCtx.createDynamicsCompressor();
+  compressor.threshold.value = -24;
+  compressor.knee.value = 30;
+  compressor.ratio.value = 12;
+  compressor.attack.value = 0.003;
+  compressor.release.value = 0.25;
+
+  const limiter = audioCtx.createDynamicsCompressor();
+  limiter.threshold.value = -3;
+  limiter.knee.value = 0;
+  limiter.ratio.value = 20;
+  limiter.attack.value = 0.001;
+  limiter.release.value = 0.05;
+
+  masterGain.connect(compressor);
+  compressor.connect(limiter);
+  limiter.connect(audioCtx.destination);
+
+  for (let i = 0; i < 4; i++) {
+    oscillatorPool.push(createPooledOscillator());
+    gainPool.push(audioCtx.createGain());
+  }
+
+  startAudioRenderLoop();
 }
 
-function playNote(frequency, intensity) {
+function createPooledOscillator() {
+  const osc = audioCtx.createOscillator();
+  osc._pooled = true;
+  osc._active = false;
+  return osc;
+}
+
+function acquireOscillator() {
+  for (let i = 0; i < oscillatorPool.length; i++) {
+    if (!oscillatorPool[i]._active) {
+      oscillatorPool[i]._active = true;
+      return oscillatorPool[i];
+    }
+  }
+  if (oscillatorPool.length < POOL_MAX_SIZE) {
+    const osc = createPooledOscillator();
+    osc._active = true;
+    oscillatorPool.push(osc);
+    return osc;
+  }
+  return null;
+}
+
+function releaseOscillator(osc) {
+  if (osc && osc._pooled) {
+    osc.disconnect();
+    osc._active = false;
+  }
+}
+
+function acquireGain() {
+  for (let i = 0; i < gainPool.length; i++) {
+    if (!gainPool[i]._active) {
+      gainPool[i]._active = true;
+      return gainPool[i];
+    }
+  }
+  if (gainPool.length < POOL_MAX_SIZE) {
+    const gain = audioCtx.createGain();
+    gain._active = true;
+    gainPool.push(gain);
+    return gain;
+  }
+  return null;
+}
+
+function releaseGain(gain) {
+  if (gain && gain._active) {
+    gain.disconnect();
+    gain.gain.cancelScheduledValues(audioCtx.currentTime);
+    gain._active = false;
+  }
+}
+
+function enqueueAudioEvent(frequency, intensity, hand) {
+  const now = performance.now();
+
+  if (now - lastAudioPlayTime[hand] < AUDIO_MIN_INTERVAL) {
+    return false;
+  }
+
+  while (audioEventQueue.length >= AUDIO_QUEUE_MAX_SIZE) {
+    audioEventQueue.shift();
+  }
+
+  audioEventQueue.push({
+    frequency,
+    intensity,
+    hand,
+    enqueueTime: now,
+    scheduled: false
+  });
+
+  return true;
+}
+
+function processAudioQueue() {
   if (!audioCtx || !masterGain) return;
 
-  const osc = audioCtx.createOscillator();
-  const gainNode = audioCtx.createGain();
+  const now = performance.now();
+  const audioNow = audioCtx.currentTime;
 
-  osc.type = 'sine';
-  osc.frequency.setValueAtTime(frequency, audioCtx.currentTime);
+  while (audioEventQueue.length > 0) {
+    const event = audioEventQueue[0];
 
-  const harmonic = audioCtx.createOscillator();
-  harmonic.type = 'triangle';
-  harmonic.frequency.setValueAtTime(frequency * 2, audioCtx.currentTime);
-  const harmonicGain = audioCtx.createGain();
-  harmonicGain.gain.value = 0.15;
+    if (now - event.enqueueTime > 500) {
+      audioEventQueue.shift();
+      continue;
+    }
 
-  const volume = Math.min(0.8, 0.1 + intensity * 0.7);
-  const now = audioCtx.currentTime;
-  const attack = 0.01;
-  const decay = 0.15;
-  const sustain = 0.3;
-  const release = 0.4;
+    if (now - lastAudioPlayTime[event.hand] < AUDIO_MIN_INTERVAL) {
+      break;
+    }
 
-  gainNode.gain.setValueAtTime(0, now);
-  gainNode.gain.linearRampToValueAtTime(volume, now + attack);
-  gainNode.gain.linearRampToValueAtTime(volume * sustain, now + attack + decay);
-  gainNode.gain.linearRampToValueAtTime(0, now + attack + decay + release);
+    const played = playNoteFromPool(event.frequency, event.intensity, audioNow);
+    if (played) {
+      lastAudioPlayTime[event.hand] = now;
+      event.scheduled = true;
+    }
+    audioEventQueue.shift();
+  }
+}
 
-  harmonicGain.gain.setValueAtTime(0, now);
-  harmonicGain.gain.linearRampToValueAtTime(volume * 0.15, now + attack);
-  harmonicGain.gain.linearRampToValueAtTime(0, now + attack + decay + release);
+function playNoteFromPool(frequency, intensity, startTime) {
+  const osc1 = acquireOscillator();
+  const osc2 = acquireOscillator();
+  const gain1 = acquireGain();
+  const gain2 = acquireGain();
 
-  osc.connect(gainNode);
-  harmonic.connect(harmonicGain);
-  gainNode.connect(masterGain);
-  harmonicGain.connect(masterGain);
+  if (!osc1 || !osc2 || !gain1 || !gain2) {
+    releaseOscillator(osc1);
+    releaseOscillator(osc2);
+    releaseGain(gain1);
+    releaseGain(gain2);
+    return false;
+  }
 
-  osc.start(now);
-  harmonic.start(now);
-  osc.stop(now + attack + decay + release + 0.1);
-  harmonic.stop(now + attack + decay + release + 0.1);
+  const volume = Math.min(0.75, 0.08 + intensity * 0.67);
+  const attack = 0.008;
+  const decay = 0.12;
+  const sustain = 0.28;
+  const release = 0.35;
+  const totalDuration = attack + decay + release + 0.05;
+
+  osc1.type = 'sine';
+  osc1.frequency.setValueAtTime(frequency, startTime);
+
+  osc2.type = 'triangle';
+  osc2.frequency.setValueAtTime(frequency * 2, startTime);
+
+  gain1.gain.cancelScheduledValues(startTime);
+  gain1.gain.setValueAtTime(0, startTime);
+
+  try {
+    gain1.gain.linearRampToValueAtTime(volume, startTime + attack);
+    gain1.gain.linearRampToValueAtTime(volume * sustain, startTime + attack + decay);
+    gain1.gain.linearRampToValueAtTime(0.0001, startTime + attack + decay + release);
+  } catch (e) {
+    gain1.gain.setValueAtTime(volume, startTime + 0.01);
+    gain1.gain.setValueAtTime(0.0001, startTime + totalDuration - 0.01);
+  }
+
+  gain2.gain.cancelScheduledValues(startTime);
+  gain2.gain.setValueAtTime(0, startTime);
+
+  const harmonicVolume = volume * 0.12;
+  try {
+    gain2.gain.linearRampToValueAtTime(harmonicVolume, startTime + attack);
+    gain2.gain.linearRampToValueAtTime(0.0001, startTime + attack + decay + release);
+  } catch (e) {
+    gain2.gain.setValueAtTime(harmonicVolume, startTime + 0.01);
+    gain2.gain.setValueAtTime(0.0001, startTime + totalDuration - 0.01);
+  }
+
+  osc1.connect(gain1);
+  osc2.connect(gain2);
+  gain1.connect(masterGain);
+  gain2.connect(masterGain);
+
+  try {
+    osc1.start(startTime);
+    osc2.start(startTime);
+  } catch (e) {
+    releaseOscillator(osc1);
+    releaseOscillator(osc2);
+    releaseGain(gain1);
+    releaseGain(gain2);
+    return false;
+  }
+
+  const stopTime = startTime + totalDuration;
+  osc1.stop(stopTime);
+  osc2.stop(stopTime);
+
+  setTimeout(() => {
+    releaseOscillator(osc1);
+    releaseOscillator(osc2);
+    releaseGain(gain1);
+    releaseGain(gain2);
+  }, totalDuration * 1000 + 50);
+
+  return true;
+}
+
+function startAudioRenderLoop() {
+  if (audioRenderLoopId) return;
+
+  const render = () => {
+    processAudioQueue();
+    audioRenderLoopId = requestAnimationFrame(render);
+  };
+
+  audioRenderLoopId = requestAnimationFrame(render);
+}
+
+function stopAudioRenderLoop() {
+  if (audioRenderLoopId) {
+    cancelAnimationFrame(audioRenderLoopId);
+    audioRenderLoopId = null;
+  }
+}
+
+function playNote(frequency, intensity, hand) {
+  if (!audioCtx || !masterGain) return;
+  enqueueAudioEvent(frequency, intensity, hand || 'left');
 }
 
 volumeSlider.addEventListener('input', () => {
@@ -115,14 +314,14 @@ function handleServerMessage(data) {
   if (data.leftBeat) {
     triggerBeat('left', data.leftIntensity);
     if (data.leftNote) {
-      playNote(data.leftNote, data.leftIntensity);
+      playNote(data.leftNote, data.leftIntensity, 'left');
       addRipple('left', data.leftIntensity);
     }
   }
   if (data.rightBeat) {
     triggerBeat('right', data.rightIntensity);
     if (data.rightNote) {
-      playNote(data.rightNote, data.rightIntensity);
+      playNote(data.rightNote, data.rightIntensity, 'right');
       addRipple('right', data.rightIntensity);
     }
   }
@@ -295,6 +494,12 @@ function stopCapture() {
     ws.close();
     ws = null;
   }
+
+  stopAudioRenderLoop();
+
+  audioEventQueue.length = 0;
+  lastAudioPlayTime.left = 0;
+  lastAudioPlayTime.right = 0;
 
   canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
   isRunning = false;
